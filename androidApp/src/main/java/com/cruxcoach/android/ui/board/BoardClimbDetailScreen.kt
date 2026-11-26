@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.PanTool
 import androidx.compose.material.icons.filled.Verified
+import androidx.compose.material.icons.filled.ViewColumn
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.Star
@@ -96,6 +97,7 @@ import com.cruxcoach.android.util.GradeDisplayHelper
 import com.cruxcoach.data.repository.AngleOption
 import com.cruxcoach.data.repository.brand
 import com.cruxcoach.domain.board.BoardBrand
+import com.cruxcoach.domain.board.DualBoulderPolicy
 import com.cruxcoach.domain.board.IntensityZones
 import com.cruxcoach.domain.board.MoonBoardVariant
 import androidx.compose.ui.res.stringResource
@@ -213,6 +215,16 @@ fun BoardClimbDetailScreen(
                 mismatch = mismatch,
             )
         } ?: run { showMismatchPicker = false }
+    }
+
+    if (state.dualBoulderPicker.show) {
+        DualBoulderPickerSheet(
+            pickerState = state.dualBoulderPicker,
+            gradeScale = state.gradeScale,
+            onQueryChange = viewModel::updateDualBoulderSearchQuery,
+            onSelect = viewModel::selectPairedBoulder,
+            onDismiss = viewModel::dismissDualBoulderPicker,
+        )
     }
 
     // Dialogs — driven by active-page state, only need one instance
@@ -716,6 +728,53 @@ fun BoardClimbDetailScreen(
                                         },
                                         modifier = Modifier.testTag("boarddetail_mirror_toggle"),
                                     )
+                                }
+                                if (state.climb != null &&
+                                    DualBoulderPolicy.isEligibleBoardBrand(state.climb!!.brand) &&
+                                    !state.playback.isRoute
+                                ) {
+                                    DropdownMenuItem(
+                                        enabled = tourTargets.active == null,
+                                        text = {
+                                            Text(
+                                                stringResource(
+                                                    if (state.pairedBoulder != null) R.string.dual_boulder_change
+                                                    else R.string.dual_boulder_add
+                                                )
+                                            )
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.ViewColumn,
+                                                contentDescription = null,
+                                                tint = if (state.pairedBoulder != null) OrangeAccent
+                                                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        },
+                                        onClick = {
+                                            moreExpanded = false
+                                            viewModel.openDualBoulderPicker()
+                                        },
+                                        modifier = Modifier.testTag("boarddetail_dual_boulder_toggle"),
+                                    )
+                                    if (state.pairedBoulder != null) {
+                                        DropdownMenuItem(
+                                            enabled = tourTargets.active == null,
+                                            text = { Text(stringResource(R.string.dual_boulder_remove)) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                )
+                                            },
+                                            onClick = {
+                                                moreExpanded = false
+                                                viewModel.clearPairedBoulder()
+                                            },
+                                            modifier = Modifier.testTag("boarddetail_dual_boulder_remove"),
+                                        )
+                                    }
                                 }
                                 // Ignore / un-ignore: keep "Quatsch" climbs (e.g.
                                 // the Weihnachtsbaum) out of every browse
@@ -1918,6 +1977,16 @@ private fun ClimbDetailPageContent(
                     )
                 }
 
+                state.pairedBoulder?.let { paired ->
+                    DualBoulderStrip(
+                        primaryClimb = climb,
+                        paired = paired,
+                        gradeScale = state.gradeScale,
+                        onChangePaired = viewModel::openDualBoulderPicker,
+                        onRemovePaired = viewModel::clearPairedBoulder,
+                    )
+                }
+
                 // Board visualization (Climbdex-style) with countdown overlay.
                 // FEAT-027: MoonBoard climbs render the climb's `frames` over
                 // the real board image when one is bundled for the variant,
@@ -1932,6 +2001,8 @@ private fun ClimbDetailPageContent(
                             frames = climb.frames,
                             assetState = rememberMoonBoardAsset(climb.layoutId),
                             variant = MoonBoardVariant.fromLayoutId(climb.layoutId),
+                            secondaryFrames = state.pairedBoulder?.frames,
+                            dualDividerColumn = state.pairedBoulder?.dividerX,
                             modifier = Modifier
                                 .testTag("boarddetail_visualization")
                         )
@@ -1952,6 +2023,8 @@ private fun ClimbDetailPageContent(
                             projectionLayers = if (climb.brand == BoardBrand.QUANTUM) {
                                 state.boardLayers.layers
                             } else emptyList(),
+                            secondaryHolds = state.pairedBoulder?.holds.orEmpty(),
+                            dualDividerX = state.pairedBoulder?.dividerX,
                             modifier = Modifier
                                 .testTag("boarddetail_visualization")
                         )

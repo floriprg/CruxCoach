@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
@@ -195,13 +196,20 @@ internal fun KilterBoardVisualization(
      */
     zoneSelectMode: Boolean = false,
     onZoneSelected: ((BoardZone) -> Unit)? = null,
+    /** Optional horizontally disjoint second boulder displayed simultaneously. */
+    secondaryHolds: List<BoardHold> = emptyList(),
+    /** Placement-space X coordinate of the vertical separator between left and right boulders. */
+    dualDividerX: Float? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
 
-    val activeHoldMap = remember(holds) {
-        holds.associateBy { it.placementId }
+    val activeHoldMap = remember(holds, secondaryHolds) {
+        buildMap(holds.size + secondaryHolds.size) {
+            secondaryHolds.forEach { put(it.placementId, it) }
+            holds.forEach { put(it.placementId, it) }
+        }
     }
     val layerColorsByPlacement = remember(projectionLayers) {
         buildMap<Int, List<Color>> {
@@ -513,6 +521,18 @@ internal fun KilterBoardVisualization(
                     boardMarkerScale(brand, xScale, boardWidth)
                 }
 
+                // Vertical divider between two simultaneously displayed boulders.
+                if (dualDividerX != null && secondaryHolds.isNotEmpty() && quantumModel == null) {
+                    val dividerPx = ((dualDividerX - edgeLeft) * xScale).coerceIn(0f, size.width)
+                    drawLine(
+                        color = Color.White.copy(alpha = 0.55f),
+                        start = Offset(dividerPx, 0f),
+                        end = Offset(dividerPx, size.height),
+                        strokeWidth = 2.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f),
+                    )
+                }
+
                 // Zone-box overlay: below the hold circles so selections stay
                 // readable on top. Live drag preview wins over the committed
                 // zone. Padded by one hold radius so the boundary holds sit
@@ -608,7 +628,7 @@ internal fun KilterBoardVisualization(
                     }
 
                     // Layer 4: Active hold circles (existing behavior — colored ring).
-                    if (holds.isNotEmpty() && !(quantumModel != null && currentClimbIsLayered)) {
+                    if (activeHoldMap.isNotEmpty() && !(quantumModel != null && currentClimbIsLayered)) {
                         val activeHold = activeHoldMap[pid]
                         if (activeHold != null) {
                             val alpha = if (previewMode && currentFrameSet != null) {

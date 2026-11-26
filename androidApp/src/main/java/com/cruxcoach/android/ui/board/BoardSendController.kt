@@ -121,14 +121,24 @@ internal class BoardSendController(
          * The holds actually being sent, not a flag that stands in for them.
          *
          * Mirroring is one way the hold set changes under a running send;
-         * stepping a route frame is another, and neither touches the climb or
-         * the angle. Identifying the variant by what goes on the wall covers
-         * every way it can change, including ones nobody has added yet.
+         * stepping a route frame or pairing a second boulder is another, and
+         * neither touches the climb or the angle. Identifying the variant by
+         * what goes on the wall covers every way it can change, including ones
+         * nobody has added yet.
          */
         val holds: List<BoardHold>,
+        val pairedClimbUuid: String? = null,
     )
 
-    private fun ClimbDetailState.variant() = SendVariant(climb?.uuid, angle, holds)
+    private fun ClimbDetailState.effectiveHolds(): List<BoardHold> =
+        pairedBoulder?.let { holds + it.holds } ?: holds
+
+    private fun ClimbDetailState.variant() = SendVariant(
+        climbUuid = climb?.uuid,
+        angle = angle,
+        holds = effectiveHolds(),
+        pairedClimbUuid = pairedBoulder?.climb?.uuid,
+    )
 
     private suspend fun sendIdentity(snapshot: ClimbDetailState): BoardSendIdentity? {
         val climb = snapshot.climb ?: return null
@@ -223,18 +233,21 @@ internal class BoardSendController(
     private suspend fun recordSentToHistory(s: ClimbDetailState) {
         val climb = s.climb ?: return
         val now = DateTimeUtil.nowIso()
-        runCatching {
-            personalBoardRepo.recordClimbHistory(
-                climbUuid = climb.uuid,
-                climbName = climb.name,
-                angle = s.angle.toLong(),
-                difficultyAverage = climb.difficultyAverage,
-                boardBrand = climb.boardBrand,
-                layoutId = climb.layoutId,
-                climbedAt = now,
-                recordedAt = now,
-            )
-        }.onFailure { Log.w(TAG, "recordClimbHistory(send) failed", it) }
+        val climbsToRecord = listOfNotNull(climb, s.pairedBoulder?.climb)
+        for (target in climbsToRecord) {
+            runCatching {
+                personalBoardRepo.recordClimbHistory(
+                    climbUuid = target.uuid,
+                    climbName = target.name,
+                    angle = s.angle.toLong(),
+                    difficultyAverage = target.difficultyAverage,
+                    boardBrand = target.boardBrand,
+                    layoutId = target.layoutId,
+                    climbedAt = now,
+                    recordedAt = now,
+                )
+            }.onFailure { Log.w(TAG, "recordClimbHistory(send) failed", it) }
+        }
     }
 
     fun sendToBoard(
@@ -347,24 +360,25 @@ internal class BoardSendController(
                     }
                     fallback.toRoleColorMap()
                 }
+                val holdsToSend = s.effectiveHolds()
                 // Holds outside the configured board size (e.g. the detail
                 // screen's larger "effective board" render, or kickboard rows
                 // on a no-kickboard size) have no LED mapping and are skipped
                 // by the encoder — the wall shows a partial climb. Surface a
                 // non-blocking warning instead of a plain "sent ok".
-                val unmappedHolds = s.holds.count { it.placementId !in placementToLed }
+                val unmappedHolds = holdsToSend.count { it.placementId !in placementToLed }
                 // FEAT-023: if NONE of the climb's holds map to the active
                 // board's LED grid it's a wrong-board climb the brand guard
                 // can't catch (e.g. a Kilter Homewall climb opened from a list
                 // while an Original size is configured — both are 'kilter').
                 // Refuse with a clear message instead of firing an empty frame
                 // + a vague "some holds not lit" warning.
-                if (unmappedHolds == s.holds.size) {
+                if (unmappedHolds == holdsToSend.size) {
                     updateMismatch(variant, boardSizeMismatch(identity))
                     return@launch
                 }
                 val success = bleConnection.sendClimb(
-                    s.holds,
+                    holdsToSend,
                     placementToLed,
                     roleColorMap,
                     expectedBrand = brand,
@@ -971,7 +985,8 @@ internal class BoardSendController(
     private fun sendMoonBoardToBoard(privatePlaylistOverride: Boolean = false) {
         val s = state.value
         val climb = s.climb ?: return
-        val frames = climb.frames
+        val pairedFrames = s.pairedBoulder?.frames.orEmpty()
+        val frames = if (pairedFrames.isNotBlank()) climb.frames + pairedFrames else climb.frames
         if (frames.isBlank() || s.ble.connectionState != ConnectionState.CONNECTED) {
             state.update { it.copy(nearby = it.nearby.copy(
                 debugInfo = "skip: frames=${frames.length} conn=${s.ble.connectionState}"

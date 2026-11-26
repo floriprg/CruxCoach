@@ -3217,4 +3217,18 @@
         <item quantity="one">%d Griff in diesem Putzgang übrig</item>
         <item quantity="other">%d Griffe in diesem Putzgang übrig</item>
     </plurals>
+
+    <!-- Dual boulder simultaneous display -->
+    <string name="dual_boulder_add">2. Boulder anzeigen</string>
+    <string name="dual_boulder_change">2. Boulder ändern</string>
+    <string name="dual_boulder_remove">2. Boulder entfernen</string>
+    <string name="dual_boulder_picker_title">2. Boulder wählen</string>
+    <string name="dual_boulder_picker_subtitle">%d passende Boulder ohne horizontale Überschneidung</string>
+    <string name="dual_boulder_picker_search_placeholder">Passende Boulder suchen…</string>
+    <string name="dual_boulder_picker_empty">Kein passender Boulder passt ohne horizontale Überschneidung daneben.</string>
+    <string name="dual_boulder_picker_no_search_results">Kein passender Boulder für „%s“ gefunden.</string>
+    <string name="dual_boulder_side_left">Links</string>
+    <string name="dual_boulder_side_right">Rechts</string>
+    <string name="dual_boulder_side_left_short">L</string>
+    <string name="dual_boulder_side_right_short">R</string>
 </resources>

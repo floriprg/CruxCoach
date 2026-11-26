@@ -37,10 +37,16 @@ import com.cruxcoach.data.repository.BoardImage
 import com.cruxcoach.data.repository.AngleOption
 import com.cruxcoach.data.repository.BoardRepository
 import com.cruxcoach.data.repository.BoardSize
+import com.cruxcoach.data.repository.ClimbSortField
+import com.cruxcoach.data.repository.ClimbTypeFilter
 import com.cruxcoach.data.repository.Climb_lists
 import com.cruxcoach.data.repository.PersonalBoardRepository
+import com.cruxcoach.data.repository.SortDirection
 import com.cruxcoach.domain.board.BoardClimbParser
 import com.cruxcoach.domain.board.BoardHold
+import com.cruxcoach.domain.board.BoulderSide
+import com.cruxcoach.domain.board.DualBoulderPolicy
+import com.cruxcoach.domain.board.HorizontalSpan
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import com.cruxcoach.android.data.RestTimerState
@@ -185,6 +191,32 @@ data class LogbookOnlyState(
  * explicit-send button stayed gone until the preference changed again (its
  * collector only emits on change).
  */
+/** Second boulder displayed simultaneously beside the active climb. */
+data class PairedBoulderState(
+    val climb: ClimbWithStats,
+    val holds: List<BoardHold>,
+    val frames: String,
+    /** Which side of the board this paired boulder sits on relative to the active climb. */
+    val side: BoulderSide,
+    /** Placement X coordinate (or MoonBoard fractional column) midway between the two boulders. */
+    val dividerX: Float,
+)
+
+/** One compatible candidate in the dual-boulder picker sheet. */
+data class DualBoulderCandidate(
+    val climb: ClimbWithStats,
+    val side: BoulderSide,
+)
+
+/** State of the modal sheet for selecting a horizontally disjoint 2nd boulder. */
+data class DualBoulderPickerState(
+    val show: Boolean = false,
+    val isLoading: Boolean = false,
+    val query: String = "",
+    val candidates: List<DualBoulderCandidate> = emptyList(),
+    val totalCompatible: Int = 0,
+)
+
 internal fun ClimbDetailState.withLiveDeviceState(live: ClimbDetailState): ClimbDetailState =
     copy(
         boardSendMode = live.boardSendMode,
@@ -197,10 +229,12 @@ internal fun ClimbDetailState.withLiveDeviceState(live: ClimbDetailState): Climb
         zones = live.zones,
         currentUserPubkey = live.currentUserPubkey,
         boardLayers = live.boardLayers,
-        // A slot choice belongs to the climb variant on which it was made.
-        // Cached neighbours must never inherit it and become a replacement.
+        // A slot choice or paired boulder belongs to the climb variant on which it was made.
+        // Cached neighbours must never inherit it.
         selectedBoardLayerSlot = null,
         selectedBoardLayerColor = null,
+        pairedBoulder = null,
+        dualBoulderPicker = DualBoulderPickerState(),
     )
 
 data class ClimbDetailState(
@@ -251,6 +285,8 @@ data class ClimbDetailState(
     val boardLayers: BoardLayerState = BoardLayerState(),
     val selectedBoardLayerSlot: Int? = null,
     val selectedBoardLayerColor: Int? = null,
+    val pairedBoulder: PairedBoulderState? = null,
+    val dualBoulderPicker: DualBoulderPickerState = DualBoulderPickerState(),
     val listDialog: ListDialogState = ListDialogState(),
     val nearby: NearbySharingState = NearbySharingState(),
     /** Hex pubkey of the local NostrSigner. Used by the UI to gate
@@ -896,10 +932,15 @@ class BoardClimbDetailViewModel @Inject constructor(
      * paths had already drifted apart once, and the half that forgot to cancel
      * let a finished send mark the newly shown variant as lit.
      */
+    private var dualBoulderJob: Job? = null
+    private var dualBoulderCacheKey: String? = null
+    private var dualBoulderCompatibleSides: Map<String, BoulderSide> = emptyMap()
+
     private fun stopWorkForPreviousVariant() {
         playbackController.stopPlayback()
         sendController.cancelSend()
         loadJob?.cancel()
+        dualBoulderJob?.cancel()
     }
 
     fun switchClimb(uuid: String, angle: Int) {
@@ -945,6 +986,8 @@ class BoardClimbDetailViewModel @Inject constructor(
                 listDialog = it.listDialog.copy(show = false),
                 selectedBoardLayerSlot = null,
                 selectedBoardLayerColor = null,
+                pairedBoulder = null,
+                dualBoulderPicker = DualBoulderPickerState(),
             ) }
         }
         loadClimb(uuid, angle)
@@ -1620,13 +1663,315 @@ class BoardClimbDetailViewModel @Inject constructor(
         } else {
             frames.getOrElse(s.playback.currentFrameIndex) { emptyList() }
         }
+        val revalidatedPaired = s.pairedBoulder?.let { paired ->
+            revalidatePairedBoulder(
+                primaryBrand = s.climb?.brand,
+                primaryLayoutId = s.climb?.layoutId ?: 0L,
+                primaryHolds = holds,
+                primaryFrames = s.climb?.frames.orEmpty(),
+                placements = s.placements,
+                paired = paired,
+            )
+        }
         _state.update { it.copy(
             isMirrored = newMirrored,
             holds = holds,
+            pairedBoulder = revalidatedPaired,
             playback = it.playback.copy(allFrames = frames),
             ble = it.ble.copy(isSending = false, success = false, error = null, warning = null),
         ) }
         viewModelScope.launch { sendAutomaticallyIfEnabled() }
+    }
+
+    // ── Dual-boulder simultaneous display ─────────────────────────────────
+
+    fun openDualBoulderPicker() {
+        val s = _state.value
+        val climb = s.climb ?: return
+        if (!DualBoulderPolicy.isEligibleBoardBrand(climb.brand) || s.playback.isRoute) return
+        _state.update {
+            it.copy(
+                dualBoulderPicker = DualBoulderPickerState(
+                    show = true,
+                    isLoading = true,
+                    query = "",
+                )
+            )
+        }
+        refreshDualBoulderCandidates(query = "")
+    }
+
+    fun dismissDualBoulderPicker() {
+        dualBoulderJob?.cancel()
+        _state.update {
+            it.copy(dualBoulderPicker = it.dualBoulderPicker.copy(show = false, isLoading = false))
+        }
+    }
+
+    fun updateDualBoulderSearchQuery(query: String) {
+        _state.update {
+            it.copy(dualBoulderPicker = it.dualBoulderPicker.copy(query = query, isLoading = true))
+        }
+        refreshDualBoulderCandidates(query = query)
+    }
+
+    fun selectPairedBoulder(candidate: ClimbWithStats) {
+        val s = _state.value
+        val primary = s.climb ?: return
+        if (candidate.uuid == primary.uuid) return
+        if (candidate.brand != primary.brand || candidate.layoutId != primary.layoutId) return
+        val paired = buildPairedBoulderState(
+            primary = primary,
+            primaryHolds = s.holds,
+            placements = s.placements,
+            candidate = candidate,
+        ) ?: return
+
+        ascentLogger.finishQuickSequence()
+        sendController.cancelSend()
+        dualBoulderJob?.cancel()
+        _state.update {
+            it.copy(
+                pairedBoulder = paired,
+                dualBoulderPicker = it.dualBoulderPicker.copy(show = false, isLoading = false),
+                ble = it.ble.copy(isSending = false, success = false, error = null, warning = null),
+            )
+        }
+        viewModelScope.launch { sendAutomaticallyIfEnabled() }
+    }
+
+    fun clearPairedBoulder() {
+        if (_state.value.pairedBoulder == null) return
+        ascentLogger.finishQuickSequence()
+        sendController.cancelSend()
+        _state.update {
+            it.copy(
+                pairedBoulder = null,
+                ble = it.ble.copy(isSending = false, success = false, error = null, warning = null),
+            )
+        }
+        viewModelScope.launch { sendAutomaticallyIfEnabled() }
+    }
+
+    private fun refreshDualBoulderCandidates(query: String) {
+        val snapshot = _state.value
+        val climb = snapshot.climb ?: return
+        if (!DualBoulderPolicy.isEligibleBoardBrand(climb.brand)) return
+
+        dualBoulderJob?.cancel()
+        dualBoulderJob = viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val brand = climb.brand
+                val layoutId = climb.layoutId.toInt()
+                val angle = snapshot.angle
+                val cacheKey = "${climb.uuid}|$angle|${snapshot.isMirrored}|${brand.wireValue}|$layoutId"
+
+                val compatibleSides: Map<String, BoulderSide> = if (dualBoulderCacheKey == cacheKey) {
+                    dualBoulderCompatibleSides
+                } else {
+                    val computed = computeCompatibleDualBoulders(snapshot, climb)
+                    dualBoulderCacheKey = cacheKey
+                    dualBoulderCompatibleSides = computed
+                    computed
+                }
+
+                if (compatibleSides.isEmpty()) {
+                    return@withContext emptyList<DualBoulderCandidate>() to 0
+                }
+
+                val productSizeId = if (brand.usesProductSizeEdgeFit) {
+                    userPreferences.boardProductSizeId.first()
+                } else 0
+
+                val trimmedQuery = query.trim()
+                val matchedClimbs: List<ClimbWithStats> = if (trimmedQuery.isNotEmpty()) {
+                    boardRepository.searchClimbsByName(
+                        query = trimmedQuery,
+                        angle = angle,
+                        layoutId = layoutId,
+                        boardBrand = brand.wireValue,
+                        sortField = ClimbSortField.ASCENSIONISTS,
+                        sortDirection = SortDirection.DESC,
+                        limit = 200,
+                        climbType = ClimbTypeFilter.BOULDER,
+                        selProductSizeId = productSizeId,
+                    ).filter { it.uuid in compatibleSides }
+                } else {
+                    val popular = boardRepository.searchClimbsSorted(
+                        angle = angle,
+                        layoutId = layoutId,
+                        boardBrand = brand.wireValue,
+                        minDifficulty = 0.0,
+                        maxDifficulty = 40.0,
+                        minAscensionists = 0,
+                        sortField = ClimbSortField.ASCENSIONISTS,
+                        sortDirection = SortDirection.DESC,
+                        limit = 400,
+                        offset = 0,
+                        climbType = ClimbTypeFilter.BOULDER,
+                        selProductSizeId = productSizeId,
+                    ).filter { it.uuid in compatibleSides }
+
+                    if (popular.size >= 40 || compatibleSides.size <= popular.size) {
+                        popular
+                    } else {
+                        val seen = popular.mapTo(HashSet(popular.size)) { it.uuid }
+                        val extraUuids = compatibleSides.keys.asSequence()
+                            .filter { it !in seen }
+                            .take(100)
+                            .toList()
+                        val extra = if (extraUuids.isNotEmpty()) {
+                            boardRepository.getClimbsByUuids(extraUuids, angle)
+                                .filter { it.layoutId == climb.layoutId && it.boardBrand == climb.boardBrand }
+                        } else emptyList()
+                        popular + extra
+                    }
+                }
+
+                val candidates = matchedClimbs
+                    .distinctBy { it.uuid }
+                    .take(80)
+                    .mapNotNull { candidate ->
+                        val side = compatibleSides[candidate.uuid] ?: return@mapNotNull null
+                        DualBoulderCandidate(climb = candidate, side = side)
+                    }
+                candidates to compatibleSides.size
+            }
+
+            _state.update { current ->
+                if (!current.dualBoulderPicker.show) current
+                else current.copy(
+                    dualBoulderPicker = current.dualBoulderPicker.copy(
+                        isLoading = false,
+                        candidates = result.first,
+                        totalCompatible = result.second,
+                    )
+                )
+            }
+        }
+    }
+
+    private fun computeCompatibleDualBoulders(
+        snapshot: ClimbDetailState,
+        climb: ClimbWithStats,
+    ): Map<String, BoulderSide> {
+        val brand = climb.brand
+        val layoutId = climb.layoutId.toInt()
+        val angle = snapshot.angle
+
+        val primarySpan: HorizontalSpan
+        val xByPlacement: Map<Int, Long>
+        val moonGridRows: Int
+        if (brand == BoardBrand.MOONBOARD) {
+            moonGridRows = MoonBoardVariant.fromLayoutId(climb.layoutId)?.gridRows
+                ?: MoonBoardVariant.GRID_ROWS
+            primarySpan = DualBoulderPolicy.moonBoardHorizontalSpan(climb.frames, moonGridRows)
+                ?: return emptyMap()
+            xByPlacement = emptyMap()
+        } else {
+            moonGridRows = MoonBoardVariant.GRID_ROWS
+            xByPlacement = snapshot.placements.mapValues { it.value.x }
+            primarySpan = DualBoulderPolicy.horizontalSpan(snapshot.holds, xByPlacement)
+                ?: return emptyMap()
+        }
+
+        val allRows = boardRepository.getAllFramesForHeatmap(
+            angle = angle,
+            layoutId = layoutId,
+            boardBrand = brand.wireValue,
+            minDifficulty = 0.0,
+            maxDifficulty = 40.0,
+            minAscensionists = 0,
+            climbType = ClimbTypeFilter.BOULDER,
+            hsmExcludedMask = 0L,
+        )
+
+        val result = LinkedHashMap<String, BoulderSide>()
+        for (row in allRows) {
+            if (row.uuid == climb.uuid) continue
+            val candidateSpan = if (brand == BoardBrand.MOONBOARD) {
+                DualBoulderPolicy.moonBoardHorizontalSpan(row.frames, moonGridRows)
+            } else {
+                DualBoulderPolicy.horizontalSpanFromFrames(row.frames, xByPlacement)
+            } ?: continue
+            val side = DualBoulderPolicy.sideOf(candidateSpan, primarySpan) ?: continue
+            result[row.uuid] = side
+        }
+        return result
+    }
+
+    private fun buildPairedBoulderState(
+        primary: ClimbWithStats,
+        primaryHolds: List<BoardHold>,
+        placements: Map<Int, BoardPlacement>,
+        candidate: ClimbWithStats,
+    ): PairedBoulderState? {
+        val brand = primary.brand
+        return if (brand == BoardBrand.MOONBOARD) {
+            val gridRows = MoonBoardVariant.fromLayoutId(primary.layoutId)?.gridRows
+                ?: MoonBoardVariant.GRID_ROWS
+            val primarySpan = DualBoulderPolicy.moonBoardHorizontalSpan(primary.frames, gridRows)
+                ?: return null
+            val candidateSpan = DualBoulderPolicy.moonBoardHorizontalSpan(candidate.frames, gridRows)
+                ?: return null
+            val side = DualBoulderPolicy.sideOf(candidateSpan, primarySpan) ?: return null
+            val dividerX = DualBoulderPolicy.dividerX(primarySpan, candidateSpan) ?: return null
+            PairedBoulderState(
+                climb = candidate,
+                holds = emptyList(),
+                frames = candidate.frames,
+                side = side,
+                dividerX = dividerX,
+            )
+        } else {
+            val xByPlacement = placements.mapValues { it.value.x }
+            val candidateHolds = BoardClimbParser.parseMultiFrames(candidate.frames).firstOrNull()
+                ?: return null
+            val primarySpan = DualBoulderPolicy.horizontalSpan(primaryHolds, xByPlacement)
+                ?: return null
+            val candidateSpan = DualBoulderPolicy.horizontalSpan(candidateHolds, xByPlacement)
+                ?: return null
+            val side = DualBoulderPolicy.sideOf(candidateSpan, primarySpan) ?: return null
+            val dividerX = DualBoulderPolicy.dividerX(primarySpan, candidateSpan) ?: return null
+            PairedBoulderState(
+                climb = candidate,
+                holds = candidateHolds,
+                frames = candidate.frames,
+                side = side,
+                dividerX = dividerX,
+            )
+        }
+    }
+
+    private fun revalidatePairedBoulder(
+        primaryBrand: BoardBrand?,
+        primaryLayoutId: Long,
+        primaryHolds: List<BoardHold>,
+        primaryFrames: String,
+        placements: Map<Int, BoardPlacement>,
+        paired: PairedBoulderState,
+    ): PairedBoulderState? {
+        val brand = primaryBrand ?: return null
+        return if (brand == BoardBrand.MOONBOARD) {
+            val gridRows = MoonBoardVariant.fromLayoutId(primaryLayoutId)?.gridRows
+                ?: MoonBoardVariant.GRID_ROWS
+            val primarySpan = DualBoulderPolicy.moonBoardHorizontalSpan(primaryFrames, gridRows)
+                ?: return null
+            val pairedSpan = DualBoulderPolicy.moonBoardHorizontalSpan(paired.frames, gridRows)
+                ?: return null
+            val side = DualBoulderPolicy.sideOf(pairedSpan, primarySpan) ?: return null
+            val dividerX = DualBoulderPolicy.dividerX(primarySpan, pairedSpan) ?: return null
+            paired.copy(side = side, dividerX = dividerX)
+        } else {
+            val xByPlacement = placements.mapValues { it.value.x }
+            val primarySpan = DualBoulderPolicy.horizontalSpan(primaryHolds, xByPlacement)
+                ?: return null
+            val pairedSpan = DualBoulderPolicy.horizontalSpan(paired.holds, xByPlacement)
+                ?: return null
+            val side = DualBoulderPolicy.sideOf(pairedSpan, primarySpan) ?: return null
+            val dividerX = DualBoulderPolicy.dividerX(primarySpan, pairedSpan) ?: return null
+            paired.copy(side = side, dividerX = dividerX)
+        }
     }
 
     private suspend fun sendAutomaticallyIfEnabled() {

@@ -20,6 +20,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -83,8 +84,18 @@ internal fun MoonBoardVisualization(
      *  for the procedural (no-photo) fallback: Mini variants have 12 rows,
      *  standard variants 18. Null falls back to the standard 18-row grid. */
     variant: MoonBoardVariant? = null,
+    /** Optional horizontally disjoint second boulder displayed simultaneously. */
+    secondaryFrames: String? = null,
+    /** 0-based fractional column index (0..10) for the vertical separator between left and right boulders. */
+    dualDividerColumn: Float? = null,
 ) {
     val climbHolds = remember(frames) { MoonBoardFrameEncoder.parseHolds(frames) }
+    val secondaryHolds = remember(secondaryFrames) {
+        secondaryFrames?.let(MoonBoardFrameEncoder::parseHolds).orEmpty()
+    }
+    val allHolds = remember(climbHolds, secondaryHolds) {
+        if (secondaryHolds.isEmpty()) climbHolds else climbHolds + secondaryHolds
+    }
     val gridRows = variant?.gridRows ?: MoonBoardVariant.GRID_ROWS
     val aspect = when (assetState) {
         is MoonBoardAssetState.Ready -> assetState.asset.imageAspect
@@ -137,7 +148,10 @@ internal fun MoonBoardVisualization(
                     }
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         if (showLattice) drawTappableLatticeMapped(asset)
-                        drawClimbHoldsMapped(asset, climbHolds)
+                        if (dualDividerColumn != null && secondaryHolds.isNotEmpty()) {
+                            drawMoonBoardDividerMapped(asset, dualDividerColumn)
+                        }
+                        drawClimbHoldsMapped(asset, allHolds)
                     }
                 }
 
@@ -145,7 +159,10 @@ internal fun MoonBoardVisualization(
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val grid = gridRect(size)
                         drawGenericRaster(grid, gridRows)
-                        drawClimbHolds(grid, climbHolds, gridRows)
+                        if (dualDividerColumn != null && secondaryHolds.isNotEmpty()) {
+                            drawMoonBoardDividerGrid(grid, dualDividerColumn)
+                        }
+                        drawClimbHolds(grid, allHolds, gridRows)
                     }
                 }
 
@@ -307,4 +324,45 @@ private fun DrawScope.drawClimbHoldsMapped(
         val norm = asset.holdXy[holdId] ?: return@forEach
         drawMoonBoardHoldMarker(Offset(norm.x * size.width, norm.y * size.height), color, radius)
     }
+}
+
+private fun DrawScope.drawMoonBoardDividerMapped(
+    asset: MoonBoardRenderAsset,
+    dividerColumn: Float,
+) {
+    val leftCol = kotlin.math.floor(dividerColumn).toInt().coerceIn(0, MoonBoardVariant.GRID_COLUMNS - 1)
+    val rightCol = kotlin.math.ceil(dividerColumn).toInt().coerceIn(0, MoonBoardVariant.GRID_COLUMNS - 1)
+    val leftXs = asset.holdXy.entries
+        .filter { (holdId, _) -> (holdId - 1) % MoonBoardVariant.GRID_COLUMNS == leftCol }
+        .map { it.value.x }
+    val rightXs = asset.holdXy.entries
+        .filter { (holdId, _) -> (holdId - 1) % MoonBoardVariant.GRID_COLUMNS == rightCol }
+        .map { it.value.x }
+    val normX = when {
+        leftXs.isNotEmpty() && rightXs.isNotEmpty() -> (leftXs.average() + rightXs.average()).toFloat() / 2f
+        else -> (dividerColumn / (MoonBoardVariant.GRID_COLUMNS - 1)).coerceIn(0f, 1f)
+    }
+    val px = (normX * size.width).coerceIn(0f, size.width)
+    drawLine(
+        color = Color.White.copy(alpha = 0.7f),
+        start = Offset(px, 0f),
+        end = Offset(px, size.height),
+        strokeWidth = 2.dp.toPx(),
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f),
+    )
+}
+
+private fun DrawScope.drawMoonBoardDividerGrid(
+    grid: Rect,
+    dividerColumn: Float,
+) {
+    val colFraction = (dividerColumn / (MoonBoardVariant.GRID_COLUMNS - 1)).coerceIn(0f, 1f)
+    val px = grid.left + colFraction * grid.width
+    drawLine(
+        color = Color.Black.copy(alpha = 0.45f),
+        start = Offset(px, grid.top),
+        end = Offset(px, grid.bottom),
+        strokeWidth = 2.dp.toPx(),
+        pathEffect = PathEffect.dashPathEffect(floatArrayOf(14f, 10f), 0f),
+    )
 }

@@ -3218,4 +3218,18 @@
         <item quantity="one">%d hold left in this cleaning round</item>
         <item quantity="other">%d holds left in this cleaning round</item>
     </plurals>
+
+    <!-- Dual boulder simultaneous display -->
+    <string name="dual_boulder_add">Show 2nd boulder</string>
+    <string name="dual_boulder_change">Change 2nd boulder</string>
+    <string name="dual_boulder_remove">Remove 2nd boulder</string>
+    <string name="dual_boulder_picker_title">Choose 2nd boulder</string>
+    <string name="dual_boulder_picker_subtitle">%d compatible boulders without horizontal overlap</string>
+    <string name="dual_boulder_picker_search_placeholder">Search compatible boulders…</string>
+    <string name="dual_boulder_picker_empty">No compatible boulder fits beside this one without horizontal overlap.</string>
+    <string name="dual_boulder_picker_no_search_results">No compatible boulder matches “%s”.</string>
+    <string name="dual_boulder_side_left">Left</string>
+    <string name="dual_boulder_side_right">Right</string>
+    <string name="dual_boulder_side_left_short">L</string>
+    <string name="dual_boulder_side_right_short">R</string>
 </resources>
