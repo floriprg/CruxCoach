@@ -934,7 +934,7 @@ class BoardClimbDetailViewModel @Inject constructor(
      */
     private var dualBoulderJob: Job? = null
     private var dualBoulderCacheKey: String? = null
-    private var dualBoulderCompatibleSides: Map<String, BoulderSide> = emptyMap()
+    private var dualBoulderCompatibleEntries: Map<String, Pair<BoulderSide, String>> = emptyMap()
 
     private fun stopWorkForPreviousVariant() {
         playbackController.stopPlayback()
@@ -1720,11 +1720,18 @@ class BoardClimbDetailViewModel @Inject constructor(
         val primary = s.climb ?: return
         if (candidate.uuid == primary.uuid) return
         if (candidate.brand != primary.brand || candidate.layoutId != primary.layoutId) return
+        val hydratedCandidate = if (candidate.frames.isNotBlank()) {
+            candidate
+        } else {
+            val cachedFrames = dualBoulderCompatibleEntries[candidate.uuid]?.second.orEmpty()
+            if (cachedFrames.isBlank()) return
+            candidate.copy(frames = cachedFrames)
+        }
         val paired = buildPairedBoulderState(
             primary = primary,
             primaryHolds = s.holds,
             placements = s.placements,
-            candidate = candidate,
+            candidate = hydratedCandidate,
         ) ?: return
 
         ascentLogger.finishQuickSequence()
@@ -1766,16 +1773,17 @@ class BoardClimbDetailViewModel @Inject constructor(
                 val angle = snapshot.angle
                 val cacheKey = "${climb.uuid}|$angle|${snapshot.isMirrored}|${brand.wireValue}|$layoutId"
 
-                val compatibleSides: Map<String, BoulderSide> = if (dualBoulderCacheKey == cacheKey) {
-                    dualBoulderCompatibleSides
-                } else {
-                    val computed = computeCompatibleDualBoulders(snapshot, climb)
-                    dualBoulderCacheKey = cacheKey
-                    dualBoulderCompatibleSides = computed
-                    computed
-                }
+                val compatibleEntries: Map<String, Pair<BoulderSide, String>> =
+                    if (dualBoulderCacheKey == cacheKey) {
+                        dualBoulderCompatibleEntries
+                    } else {
+                        val computed = computeCompatibleDualBoulders(snapshot, climb)
+                        dualBoulderCacheKey = cacheKey
+                        dualBoulderCompatibleEntries = computed
+                        computed
+                    }
 
-                if (compatibleSides.isEmpty()) {
+                if (compatibleEntries.isEmpty()) {
                     return@withContext emptyList<DualBoulderCandidate>() to 0
                 }
 
@@ -1795,7 +1803,7 @@ class BoardClimbDetailViewModel @Inject constructor(
                         limit = 200,
                         climbType = ClimbTypeFilter.BOULDER,
                         selProductSizeId = productSizeId,
-                    ).filter { it.uuid in compatibleSides }
+                    ).filter { it.uuid in compatibleEntries }
                 } else {
                     val popular = boardRepository.searchClimbsSorted(
                         angle = angle,
@@ -1810,13 +1818,13 @@ class BoardClimbDetailViewModel @Inject constructor(
                         offset = 0,
                         climbType = ClimbTypeFilter.BOULDER,
                         selProductSizeId = productSizeId,
-                    ).filter { it.uuid in compatibleSides }
+                    ).filter { it.uuid in compatibleEntries }
 
-                    if (popular.size >= 40 || compatibleSides.size <= popular.size) {
+                    if (popular.size >= 40 || compatibleEntries.size <= popular.size) {
                         popular
                     } else {
                         val seen = popular.mapTo(HashSet(popular.size)) { it.uuid }
-                        val extraUuids = compatibleSides.keys.asSequence()
+                        val extraUuids = compatibleEntries.keys.asSequence()
                             .filter { it !in seen }
                             .take(100)
                             .toList()
@@ -1832,10 +1840,11 @@ class BoardClimbDetailViewModel @Inject constructor(
                     .distinctBy { it.uuid }
                     .take(80)
                     .mapNotNull { candidate ->
-                        val side = compatibleSides[candidate.uuid] ?: return@mapNotNull null
-                        DualBoulderCandidate(climb = candidate, side = side)
+                        val (side, frames) = compatibleEntries[candidate.uuid] ?: return@mapNotNull null
+                        val hydrated = if (candidate.frames.isBlank()) candidate.copy(frames = frames) else candidate
+                        DualBoulderCandidate(climb = hydrated, side = side)
                     }
-                candidates to compatibleSides.size
+                candidates to compatibleEntries.size
             }
 
             _state.update { current ->
@@ -1854,7 +1863,7 @@ class BoardClimbDetailViewModel @Inject constructor(
     private fun computeCompatibleDualBoulders(
         snapshot: ClimbDetailState,
         climb: ClimbWithStats,
-    ): Map<String, BoulderSide> {
+    ): Map<String, Pair<BoulderSide, String>> {
         val brand = climb.brand
         val layoutId = climb.layoutId.toInt()
         val angle = snapshot.angle
@@ -1886,7 +1895,7 @@ class BoardClimbDetailViewModel @Inject constructor(
             hsmExcludedMask = 0L,
         )
 
-        val result = LinkedHashMap<String, BoulderSide>()
+        val result = LinkedHashMap<String, Pair<BoulderSide, String>>()
         for (row in allRows) {
             if (row.uuid == climb.uuid) continue
             val candidateSpan = if (brand == BoardBrand.MOONBOARD) {
@@ -1895,7 +1904,7 @@ class BoardClimbDetailViewModel @Inject constructor(
                 DualBoulderPolicy.horizontalSpanFromFrames(row.frames, xByPlacement)
             } ?: continue
             val side = DualBoulderPolicy.sideOf(candidateSpan, primarySpan) ?: continue
-            result[row.uuid] = side
+            result[row.uuid] = side to row.frames
         }
         return result
     }
